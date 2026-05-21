@@ -1,0 +1,23 @@
+pydantic
+rich
+openai
+tomli
+platformdirs
+click 
+platformdirs
+playwright
+ddgs
+httpx
+tweepy
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib 
+requests
+langchain_core
+langchain_chroma
+langchain
+pdfminer.six unstructured[pdf]
+unstructured
+langchain_openai
+langchain_community
+sentence-transformers
