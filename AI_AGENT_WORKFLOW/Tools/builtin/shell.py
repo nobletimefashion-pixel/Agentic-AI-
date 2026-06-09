@@ -1,21 +1,23 @@
 import asyncio
 import os
 from pathlib import Path
+import signal
 import sys
+from Tools.base import Tool, ToolConfirmation, ToolInvokation, ToolKind, ToolResult
 from pydantic import BaseModel, Field
-from Tools.base import Tool, ToolInvokation, ToolKind, ToolResult
 import fnmatch
 
 BLOCKED_COMMANDS = {
     "rm -rf /",
     "rm -rf ~",
     "rm -rf /*",
-    "dd if=/dev/random",
     "dd if=/dev/zero",
+    "dd if=/dev/random",
     "mkfs",
     "fdisk",
     "parted",
-    ":(){ :|:& };:", # fork bomb
+    ":(){ :|:& };:",  # Fork bomb
+    "chmod 777 /",
     "chmod -R 777",
     "shutdown",
     "reboot",
@@ -25,46 +27,72 @@ BLOCKED_COMMANDS = {
     "init 6",
 }
 
+
 class ShellParams(BaseModel):
-    command: str = Field(
-        ...,
-        description="The shell command to execute"
+    command: str = Field(..., description="The shell command to execute")
+    timeout: int = Field(
+        120, ge=1, le=600, description="Timeout in seconds (default: 120)"
     )
-    timeout: int = Field(120, ge=1, le=600, description="Timeout in seconds (default: 120)")
     cwd: str | None = Field(None, description="Working directory for the command")
+
 
 class ShellTool(Tool):
     name = "shell"
     kind = ToolKind.SHELL
-    description="Execute a shell command. Use this for running system commands, scripts and CLI tools."
+    description = "Execute a shell command. Use this for running system commands, scripts and CLI tools."
+
     schema = ShellParams
-    
+
+    async def get_confirmation(
+        self, invocation: ToolInvokation
+    ) -> ToolConfirmation | None:
+        params = ShellParams(**invocation.params)
+
+        for blocked in BLOCKED_COMMANDS:
+            if blocked in params.command:
+                return ToolConfirmation(
+                    tool_name=self.name,
+                    params=invocation.params,
+                    description=f"Execute (BLOCKED): {params.command}",
+                    command=params.command,
+                    is_dangerous=True,
+                )
+
+        return ToolConfirmation(
+            tool_name=self.name,
+            params=invocation.params,
+            description=f"Execute: {params.command}",
+            command=params.command,
+            is_dangerous=False,
+        )
+
     async def execute(self, invocation: ToolInvokation) -> ToolResult:
         params = ShellParams(**invocation.params)
-        
+
         command = params.command.lower().strip()
         for blocked in BLOCKED_COMMANDS:
             if blocked in command:
                 return ToolResult.error_result(
                     f"Command blocked for safety: {params.command}",
-                    metadata={'blocked':True}
+                    metadata={"blocked": True},
                 )
-                
+
         if params.cwd:
             cwd = Path(params.cwd)
             if not cwd.is_absolute():
                 cwd = invocation.cwd / cwd
         else:
             cwd = invocation.cwd
-            
+
         if not cwd.exists():
-            return ToolResult.error_result(f"Working directory deos not exist: {cwd}")
-        
+            return ToolResult.error_result(f"Working directory doesn't exist: {cwd}")
+
         env = self._build_environment()
-        if sys.platform == 'win32':
-            shell_cmd = ['cmd.exe','/c',params.command]
+        if sys.platform == "win32":
+            shell_cmd = ["cmd.exe", "/c", params.command]
         else:
-            shell_cmd = ['/bin/bash','-c',params.command]
+            shell_cmd = ["/bin/bash", "-c", params.command]
+
         process = await asyncio.create_subprocess_exec(
             *shell_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -72,9 +100,10 @@ class ShellTool(Tool):
             cwd=cwd,
             env=env,
             start_new_session=True,
-            )#this spawns a new process of any app/prcess that we give it
+        )
+
         try:
-            stdout_data,stderr_data = await asyncio.wait_for(
+            stdout_data, stderr_data = await asyncio.wait_for(
                 process.communicate(),
                 timeout=params.timeout,
             )
@@ -85,43 +114,47 @@ class ShellTool(Tool):
                 process.kill()
             await process.wait()
             return ToolResult.error_result(f"Command timed out after {params.timeout}s")
-        stdout = stdout_data.decode('utf-8',errors='replace')
-        
-        stderr = stderr_data.decode('utf-8',errors='replace')
-        
+
+        stdout = stdout_data.decode("utf-8", errors="replace")
+        stderr = stderr_data.decode("utf-8", errors="replace")
         exit_code = process.returncode
+
         output = ""
         if stdout.strip():
             output += stdout.rstrip()
+
         if stderr.strip():
-            output += '\n----stderr----\n'
+            output += "\n--- stderr ---\n"
             output += stderr.rstrip()
+
         if exit_code != 0:
-            output += f'\nExit Code {exit_code}'
-            
-        if len(output) > 100*1024:
-            output = output[:100*1024] + '\n... [output truncated]'
-        
+            output += f"\nExit code: {exit_code}"
+
+        if len(output) > 100 * 1024:
+            output = output[: 100 * 1024] + "\n... [output truncated]"
+
         return ToolResult(
-            success=exit_code==0,
+            success=exit_code == 0,
             output=output,
             error=stderr if exit_code != 0 else None,
-            exit_code=exit_code
+            exit_code=exit_code,
         )
-            
-    def _build_environment(self) -> dict[str,str]:
+
+    def _build_environment(self) -> dict[str, str]:
         env = os.environ.copy()
+
         shell_environment = self.config.shell_environment
-        
+
         if not shell_environment.ignore_default_excludes:
             for pattern in shell_environment.exclude_patterns:
-                keys_to_remove = [k for k in env.keys() if fnmatch.fnmatch(k.upper(),pattern.upper())]
-                
+                keys_to_remove = [
+                    k for k in env.keys() if fnmatch.fnmatch(k.upper(), pattern.upper())
+                ]
+
                 for k in keys_to_remove:
                     del env[k]
-                    
+
         if shell_environment.set_vars:
             env.update(shell_environment.set_vars)
-            
+
         return env
-        
